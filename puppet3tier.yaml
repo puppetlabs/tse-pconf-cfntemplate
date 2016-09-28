@@ -1,0 +1,389 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: TSE Demo Stack for Application Orchestrator
+Parameters:
+  KeyPairName:
+    Description: Public/private key pair
+    Type: AWS::EC2::KeyPair::KeyName
+  ApplicationName:
+    Description: ApplicationName
+    Default: rgbank
+    Type: String
+  PuppetMaster:
+    Description: Puppet Master Hostname
+    Default: ip-172-31-6-59.us-west-2.compute.internal
+    Type: String
+  DatabaseRoleName:
+    Description: Role name for Database tier
+    Default: DatabaseNode
+    Type: String
+  AppRoleName:
+    Description: Role name for Application tier
+    Default: AppNode
+    Type: String
+  WebRoleName:
+    Description: Role name for Application tier
+    Default: WebNode
+    Type: String
+  SubnetId:
+    Description: VPC Subnet ID for EC2 Instances
+    Type: AWS::EC2::Subnet::Id
+  VPC:
+    Description: VPC Id
+    Type: AWS::EC2::VPC::Id
+  RemoteAdminCIDR:
+    Description: CIDR Block or IP for SSH and RDP access
+    Type: String
+    Default: 0.0.0.0/0
+    AllowedPattern: "[a-zA-Z0-9]+\\..+"
+  VPCCIDR:
+    Description: CIDR Block for the VPC
+    Type: String
+    Default: 172.31.0.0/16
+    AllowedPattern: "[a-zA-Z0-9]+\\..+"
+Mappings:
+  AWSAMIRegionMap:
+    AMI:
+      RHEL72HVM: RHEL-7.2_HVM_GA-20151112-x86_64-1-Hourly2-GP2
+    ap-northeast-1:
+      RHEL72HVM: ami-0dd8f963
+    ap-northeast-2:
+      RHEL72HVM: ami-44db152a
+    ap-southeast-1:
+      RHEL72HVM: ami-3f03c55c
+    ap-southeast-2:
+      RHEL72HVM: ami-e0c19f83
+    eu-central-1:
+      RHEL72HVM: ami-875042eb
+    eu-west-1:
+      RHEL72HVM: ami-8b8c57f8
+    sa-east-1:
+      RHEL72HVM: ami-27b3094b
+    us-east-1:
+      RHEL72HVM: ami-2051294a
+    us-west-1:
+      RHEL72HVM: ami-d1315fb1
+    us-west-2:
+      RHEL72HVM: ami-775e4f16
+Resources:
+  DatabaseNode:
+    Type: AWS::EC2::Instance
+    Metadata:
+      AWS::CloudFormation::Init:
+        config:
+          packages:
+            yum:
+              curl: []
+              wget: []
+    Properties:
+      ImageId:
+        Fn::FindInMap:
+        - AWSAMIRegionMap
+        - Ref: AWS::Region
+        - RHEL72HVM
+      InstanceType: t2.medium
+      NetworkInterfaces:
+      - DeleteOnTermination: 'true'
+        DeviceIndex: 0
+        SubnetId:
+          Ref: SubnetId
+        GroupSet:
+        - Ref: AppstackSecurityGroup
+      Tags:
+      - Key: Name
+        Value: DatabaseNode
+      - Key: project
+        Value: puppetconfcloudapp
+      - Key: department
+        Value: TSE
+      - Key: created_by
+        Value:
+          Ref: KeyPairName
+      KeyName:
+        Ref: KeyPairName
+      UserData:
+        Fn::Base64:
+          Fn::Join:
+          - ''
+          - - "#!/bin/bash -x \n"
+            - |
+              yum install -y https://dl.fedoraproject.org/pub/epel/epel-release-latest-7.noarch.rpm
+            - |
+              yum install -y python-setuptools python-daemon pystache python-ecdsa python-paramiko python-keyczar python-crypto python-httplib
+            - |
+              easy_install https://s3.amazonaws.com/cloudformation-examples/aws-cfn-bootstrap-latest.tar.gz
+            - "/usr/bin/cfn-init "
+            - " --stack "
+            - Ref: AWS::StackName
+            - " --resource DatabaseNode "
+            - " --region "
+            - Ref: AWS::Region
+            - "\n"
+            - "PUPPET_MASTER="
+            - Ref: PuppetMaster
+            - "\n"
+            - "PP_INSTANCE_ID=$(curl -s http://169.254.169.254/latest/meta-data/instance-id)\n"
+            - "PP_IMAGE_NAME=$(curl -s http://169.254.169.254/latest/meta-data/ami-id)\n"
+            - "PP_REGION="
+            - Ref: AWS::Region
+            - "\n"
+            - "PP_APPLICATION="
+            - Ref: ApplicationName
+            - "\n"
+            - "PP_ROLE="
+            - Ref: DatabaseRoleName
+            - "\n"
+            - "mkdir -p /opt/puppetlabs/puppet/cache/state/\n"
+            - "echo '{\"disabled_message\":\"disabled for deploy\"}' > /opt/puppetlabs/puppet/cache/state/agent_disabled.lock\n"
+            - "mkdir -p /etc/puppetlabs/facter/facts.d\n"
+            - "mkdir -p /etc/puppetlabs/puppet/\n"
+            - "cat > /etc/puppetlabs/puppet/csr_attributes.yaml << YAML\n"
+            - "extension_requests:\n"
+            - "  pp_instance_id: $PP_INSTANCE_ID\n"
+            - "  pp_image_name: $PP_IMAGE_NAME\n"
+            - "  pp_region: $PP_REGION\n"
+            - "  pp_application: $PP_APPLICATION\n"
+            - "  pp_role: $PP_ROLE\n"
+            - "YAML\n"
+            - "curl -k https://$PUPPET_MASTER:8140/packages/current/install.bash | /bin/bash -s agent:certname=$PP_INSTANCE_ID\n"
+            - "/opt/puppetlabs/bin/puppet resource service puppet ensure=stopped enable=false\n"
+            - "/opt/puppetlabs/bin/puppet agent --enable\n"
+            - "/opt/puppetlabs/bin/puppet agent --onetime --no-daemonize --no-splay --no-use_cached_catalog --no-usecacheonfailure\n"
+            - "/usr/bin/cfn-signal"
+            - " -e $?"
+            - " '"
+            - Ref: WaitforDatabaseNodeInstall
+            - "'"
+            - "\n"
+            - "/opt/puppetlabs/bin/puppet resource service puppet ensure=running enable=true\n"
+            - |2+
+            - |2+
+
+  WaitforDatabaseNodeInstall:
+    Type: AWS::CloudFormation::WaitConditionHandle
+  DatabaseNodeWaitCondition:
+    Type: AWS::CloudFormation::WaitCondition
+    DependsOn: DatabaseNode
+    Properties:
+      Handle:
+        Ref: WaitforDatabaseNodeInstall
+      Timeout: '2000'
+  AppstackSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Appstack Security
+      VpcId:
+        Ref: VPC
+      SecurityGroupIngress:
+      - IpProtocol: tcp
+        FromPort: '22'
+        ToPort: '22'
+        CidrIp:
+          Ref: RemoteAdminCIDR
+      - IpProtocol: tcp
+        FromPort: '5432'
+        ToPort: '5432'
+        CidrIp:
+          Ref: VPCCIDR
+      - IpProtocol: tcp
+        FromPort: '22'
+        ToPort: '22'
+        CidrIp:
+          Ref: VPCCIDR
+      - IpProtocol: tcp
+        FromPort: '443'
+        ToPort: '443'
+        CidrIp:
+          Ref: RemoteAdminCIDR
+      - IpProtocol: tcp
+        FromPort: '8080'
+        ToPort: '8080'
+        CidrIp:
+          Ref: RemoteAdminCIDR
+      - IpProtocol: tcp
+        FromPort: '80'
+        ToPort: '80'
+        CidrIp:
+          Ref: RemoteAdminCIDR
+  AppNode:
+    Type: AWS::EC2::Instance
+    DependsOn: DatabaseNodeWaitCondition
+    Metadata:
+      AWS::CloudFormation::Init:
+        config:
+          packages:
+            yum:
+              curl: []
+              wget: []
+    Properties:
+      ImageId:
+        Fn::FindInMap:
+        - AWSAMIRegionMap
+        - Ref: AWS::Region
+        - RHEL72HVM
+      InstanceType: t2.medium
+      NetworkInterfaces:
+      - DeleteOnTermination: 'true'
+        DeviceIndex: 0
+        SubnetId:
+          Ref: SubnetId
+        GroupSet:
+        - Ref: AppstackSecurityGroup
+      Tags:
+      - Key: Name
+        Value: AppNode
+      - Key: project
+        Value: puppetconfcloudapp
+      - Key: department
+        Value: TSE
+      - Key: created_by
+        Value:
+          Ref: KeyPairName
+      KeyName:
+        Ref: KeyPairName
+      UserData:
+        Fn::Base64:
+          Fn::Join:
+          - ''
+          - - "#!/bin/bash -x \n"
+            - |
+              yum install -y https://dl.fedoraproject.org/pub/epel/epel-release-latest-7.noarch.rpm
+            - |
+              yum install -y python-setuptools python-daemon pystache python-ecdsa python-paramiko python-keyczar python-crypto python-httplib
+            - |
+              easy_install https://s3.amazonaws.com/cloudformation-examples/aws-cfn-bootstrap-latest.tar.gz
+            - "/usr/bin/cfn-init "
+            - " --stack "
+            - Ref: AWS::StackName
+            - " --resource AppNode "
+            - " --region "
+            - Ref: AWS::Region
+            - "\n"
+            - "PUPPET_MASTER="
+            - Ref: PuppetMaster
+            - "\n"
+            - "PP_INSTANCE_ID=$(curl -s http://169.254.169.254/latest/meta-data/instance-id)\n"
+            - "PP_IMAGE_NAME=$(curl -s http://169.254.169.254/latest/meta-data/ami-id)\n"
+            - "PP_REGION="
+            - Ref: AWS::Region
+            - "\n"
+            - "PP_APPLICATION="
+            - Ref: ApplicationName
+            - "\n"
+            - "PP_ROLE="
+            - Ref: AppRoleName
+            - "\n"
+            - "mkdir -p /opt/puppetlabs/puppet/cache/state/\n"
+            - "echo '{\"disabled_message\":\"disabled for deploy\"}' > /opt/puppetlabs/puppet/cache/state/agent_disabled.lock\n"
+            - "mkdir -p /etc/puppetlabs/facter/facts.d\n"
+            - "mkdir -p /etc/puppetlabs/puppet/\n"
+            - "cat > /etc/puppetlabs/puppet/csr_attributes.yaml << YAML\n"
+            - "extension_requests:\n"
+            - "  pp_instance_id: $PP_INSTANCE_ID\n"
+            - "  pp_image_name: $PP_IMAGE_NAME\n"
+            - "  pp_region: $PP_REGION\n"
+            - "  pp_application: $PP_APPLICATION\n"
+            - "  pp_role: $PP_ROLE\n"
+            - "YAML\n"
+            - "curl -k https://$PUPPET_MASTER:8140/packages/current/install.bash | /bin/bash -s agent:certname=$PP_INSTANCE_ID\n"
+            - "/opt/puppetlabs/bin/puppet resource service puppet ensure=stopped enable=false\n"
+            - "/opt/puppetlabs/bin/puppet agent --enable\n"
+            - "/opt/puppetlabs/bin/puppet agent --onetime --no-daemonize --no-splay --no-use_cached_catalog --no-usecacheonfailure\n"
+            - "/usr/bin/cfn-signal"
+            - " -e $?"
+            - " '"
+            - Ref: WaitforAppNodeInstall
+            - "'"
+            - "\n"
+            - "/opt/puppetlabs/bin/puppet resource service puppet ensure=running enable=true\n"
+            - |2+
+            - |2+
+  WaitforAppNodeInstall:
+    Type: AWS::CloudFormation::WaitConditionHandle
+  AppNodeWaitCondition:
+    Type: AWS::CloudFormation::WaitCondition
+    DependsOn: AppNode
+    Properties:
+      Handle:
+        Ref: WaitforAppNodeInstall
+      Timeout: '2000'
+  WebNode:
+    Type: AWS::EC2::Instance
+    DependsOn: AppNodeWaitCondition
+    Metadata:
+      AWS::CloudFormation::Init:
+        config:
+          packages:
+            yum:
+              curl: []
+              wget: []
+    Properties:
+      ImageId:
+        Fn::FindInMap:
+        - AWSAMIRegionMap
+        - Ref: AWS::Region
+        - RHEL72HVM
+      InstanceType: t2.medium
+      NetworkInterfaces:
+      - DeleteOnTermination: 'true'
+        DeviceIndex: 0
+        SubnetId:
+          Ref: SubnetId
+        GroupSet:
+        - Ref: AppstackSecurityGroup
+      Tags:
+      - Key: Name
+        Value: WebNode
+      - Key: project
+        Value: puppetconfcloudapp
+      - Key: department
+        Value: TSE
+      - Key: created_by
+        Value:
+          Ref: KeyPairName
+      KeyName:
+        Ref: KeyPairName
+      UserData:
+        Fn::Base64:
+          Fn::Join:
+          - ''
+          - - "#!/bin/bash -x \n"
+            - "PUPPET_MASTER="
+            - Ref: PuppetMaster
+            - "\n"
+            - "PP_INSTANCE_ID=$(curl -s http://169.254.169.254/latest/meta-data/instance-id)\n"
+            - "PP_IMAGE_NAME=$(curl -s http://169.254.169.254/latest/meta-data/ami-id)\n"
+            - "PP_REGION="
+            - Ref: AWS::Region
+            - "\n"
+            - "PP_APPLICATION="
+            - Ref: ApplicationName
+            - "\n"
+            - "PP_ROLE="
+            - Ref: AppRoleName
+            - "\n"
+            - "mkdir -p /opt/puppetlabs/puppet/cache/state/\n"
+            - "echo '{\"disabled_message\":\"disabled for deploy\"}' > /opt/puppetlabs/puppet/cache/state/agent_disabled.lock\n"
+            - "mkdir -p /etc/puppetlabs/facter/facts.d\n"
+            - "mkdir -p /etc/puppetlabs/puppet/\n"
+            - "cat > /etc/puppetlabs/puppet/csr_attributes.yaml << YAML\n"
+            - "extension_requests:\n"
+            - "  pp_instance_id: $PP_INSTANCE_ID\n"
+            - "  pp_image_name: $PP_IMAGE_NAME\n"
+            - "  pp_region: $PP_REGION\n"
+            - "  pp_application: $PP_APPLICATION\n"
+            - "  pp_role: $PP_ROLE\n"
+            - "YAML\n"
+            - "curl -k https://$PUPPET_MASTER:8140/packages/current/install.bash | /bin/bash -s agent:certname=$PP_INSTANCE_ID\n"
+            - "/opt/puppetlabs/bin/puppet resource service puppet ensure=stopped enable=false\n"
+            - "/opt/puppetlabs/bin/puppet agent --enable\n"
+            - "/opt/puppetlabs/bin/puppet agent --onetime --no-daemonize --no-splay --no-use_cached_catalog --no-usecacheonfailure\n"
+            - "/opt/puppetlabs/bin/puppet resource service puppet ensure=running enable=true\n"
+            - |2+
+            - |2+
+Outputs:
+  DatabaseNodeDnsName:
+    Value:
+      Fn::GetAtt:
+      - DatabaseNode
+      - PublicDnsName
+    Description: Public DNS Name for the Database Server
