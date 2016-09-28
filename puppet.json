@@ -1,0 +1,3 @@
+This is a cloudformation template that does a simple 3tier application deployment with ordering.
+
+Specifically, it is using waitcondition function in AWS to allow for a node to launch after a previous nodes
